@@ -1,3 +1,5 @@
+import math
+import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext
 from database.db_handler import (
@@ -5,16 +7,16 @@ from database.db_handler import (
     grant_admin_all, revoke_admin_all, grant_admin_account, revoke_admin_account,
     log_action, get_user_by_tg, get_account_by_id, set_user_role
 )
-import math
-import logging
 
 logger = logging.getLogger(__name__)
 ACCOUNTS_PER_PAGE = 8
+
 
 def _get_all_accounts_list(conn):
     cur = conn.cursor()
     cur.execute("SELECT * FROM accounts ORDER BY id DESC")
     return cur.fetchall()
+
 
 def _build_accounts_keyboard(accounts, admin_db_id, page=0, selected_ids=None):
     selected_ids = set(selected_ids or [])
@@ -38,7 +40,8 @@ def _build_accounts_keyboard(accounts, admin_db_id, page=0, selected_ids=None):
                InlineKeyboardButton("❌ Cancel", callback_data="grant_cancel")])
     return InlineKeyboardMarkup(kb)
 
-def notify_owners_on_account_removed(context: CallbackContext, conn, removed_account_id: int, removed_by_tg_id: int):
+
+async def notify_owners_on_account_removed(context: CallbackContext, conn, removed_account_id: int, removed_by_tg_id: int):
     owners = get_owner_ids_from_env()
     account = get_account_by_id(conn, removed_account_id)
     remover = None
@@ -54,18 +57,23 @@ def notify_owners_on_account_removed(context: CallbackContext, conn, removed_acc
     )
     for oid in owners:
         try:
-            context.bot.send_message(chat_id=oid, text=message)
+            await context.bot.send_message(chat_id=oid, text=message)
         except Exception:
             logger.exception("Failed to notify owner %s", oid)
 
-def callback_router(update: Update, context: CallbackContext):
+
+async def callback_router(update: Update, context: CallbackContext):
     query = update.callback_query
     if not query:
         return
     data = query.data or ""
-    query.answer()
+    await query.answer()
     conn = get_conn()
     user = update.effective_user
+
+    # helper: safe actor db id
+    actor_row = get_user_by_tg(conn, user.id)
+    actor_db_id = actor_row["id"] if actor_row else None
 
     if data == "owner_menu":
         kb = [
@@ -74,7 +82,7 @@ def callback_router(update: Update, context: CallbackContext):
             [InlineKeyboardButton("🚫 Revoke Admin", callback_data="owner_revoke_admin")],
             [InlineKeyboardButton("📣 Broadcast", callback_data="owner_broadcast")],
         ]
-        query.edit_message_text("Owner menu:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("Owner menu:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
     if data == "owner_show_users":
@@ -85,43 +93,48 @@ def callback_router(update: Update, context: CallbackContext):
         )
         rows = cur.fetchall()
         if not rows:
-            query.edit_message_text("No users found.")
+            await query.edit_message_text("No users found.")
             return
         lines = []
         for r in rows:
             lines.append(f"{r['tg_id']} | @{r['username'] or '—'} | {r['first_name'] or '—'} | role={r['role']} | accounts={r['account_count']} | banned={'yes' if r['is_banned'] else 'no'}")
-        query.edit_message_text("Users:\n\n" + "\n".join(lines))
+        await query.edit_message_text("Users:\n\n" + "\n".join(lines))
         return
 
     # Grant admin start
     if data == "owner_grant_admin":
-        query.edit_message_text("Reply in chat with the target admin's TELEGRAM NUMERIC ID to grant admin role.")
+        await query.edit_message_text("Reply in chat with the target admin's TELEGRAM NUMERIC ID to grant admin role.")
         context.user_data["grant_admin_step"] = "await_id"
         return
 
     if data == "owner_revoke_admin":
-        query.edit_message_text("Reply in chat with the admin's TELEGRAM NUMERIC ID to revoke admin role.")
+        await query.edit_message_text("Reply in chat with the admin's TELEGRAM NUMERIC ID to revoke admin role.")
         context.user_data["revoke_admin_step"] = "await_id"
         return
 
     # Grant flow: scope selection and account selection
     if data.startswith("grant_scope_all:"):
-        admin_db_id = int(data.split(":", 1)[1])
         try:
-            grant_admin_all(conn, admin_db_id, actor_user_id=get_user_by_tg(conn, user.id)["id"])
-            query.edit_message_text("All accounts granted to admin.")
+            admin_db_id = int(data.split(":", 1)[1])
         except Exception:
-            query.edit_message_text("Failed to grant all accounts.")
+            await query.edit_message_text("Invalid admin id.")
+            return
+        try:
+            grant_admin_all(conn, admin_db_id, actor_user_id=actor_db_id)
+            await query.edit_message_text("All accounts granted to admin.")
+        except Exception:
+            logger.exception("grant_scope_all failed")
+            await query.edit_message_text("Failed to grant all accounts.")
         return
 
     if data.startswith("grant_scope_select:"):
-        admin_db_id = int(data.split(":",1)[1])
+        admin_db_id = int(data.split(":", 1)[1])
         accounts = _get_all_accounts_list(conn)
         context.user_data.setdefault("grant_selected_accounts", [])
         context.user_data["grant_admin_selecting"] = admin_db_id
         page = 0
         kb = _build_accounts_keyboard(accounts, admin_db_id, page, selected_ids=context.user_data["grant_selected_accounts"])
-        query.edit_message_text("Select accounts to grant (toggle):", reply_markup=kb)
+        await query.edit_message_text("Select accounts to grant (toggle):", reply_markup=kb)
         return
 
     if data.startswith("grant_page:"):
@@ -130,7 +143,7 @@ def callback_router(update: Update, context: CallbackContext):
         accounts = _get_all_accounts_list(conn)
         selected = context.user_data.get("grant_selected_accounts", [])
         kb = _build_accounts_keyboard(accounts, admin_db_id, page, selected_ids=selected)
-        query.edit_message_text("Select accounts to grant (toggle):", reply_markup=kb)
+        await query.edit_message_text("Select accounts to grant (toggle):", reply_markup=kb)
         return
 
     if data.startswith("grant_toggle:"):
@@ -144,7 +157,7 @@ def callback_router(update: Update, context: CallbackContext):
         context.user_data["grant_selected_accounts"] = list(sel)
         accounts = _get_all_accounts_list(conn)
         kb = _build_accounts_keyboard(accounts, admin_db_id, page, selected_ids=context.user_data["grant_selected_accounts"])
-        query.edit_message_reply_markup(reply_markup=kb)
+        await query.edit_message_reply_markup(reply_markup=kb)
         return
 
     if data.startswith("grant_done:"):
@@ -152,7 +165,7 @@ def callback_router(update: Update, context: CallbackContext):
         admin_db_id = int(admin_db_id_str)
         selected = context.user_data.get("grant_selected_accounts", [])
         if not selected:
-            query.edit_message_text("No accounts selected. Cancelled.")
+            await query.edit_message_text("No accounts selected. Cancelled.")
             context.user_data.pop("grant_selected_accounts", None)
             context.user_data.pop("grant_admin_selecting", None)
             return
@@ -161,7 +174,7 @@ def callback_router(update: Update, context: CallbackContext):
             [InlineKeyboardButton("Confirm grant", callback_data=f"grant_confirm_selected:{admin_db_id}:{ids_csv}")],
             [InlineKeyboardButton("Cancel", callback_data="grant_cancel")]
         ]
-        query.edit_message_text(f"Confirm granting {len(selected)} accounts to admin?", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"Confirm granting {len(selected)} accounts to admin?", reply_markup=InlineKeyboardMarkup(kb))
         return
 
     if data.startswith("grant_confirm_selected:"):
@@ -171,29 +184,31 @@ def callback_router(update: Update, context: CallbackContext):
         ids = [int(x) for x in ids_csv.split(",") if x.strip()]
         try:
             for aid in ids:
-                grant_admin_account(conn, admin_db_id, aid, actor_user_id=get_user_by_tg(conn, user.id)["id"])
-            query.edit_message_text(f"Granted {len(ids)} accounts to admin.")
+                grant_admin_account(conn, admin_db_id, aid, actor_user_id=actor_db_id)
+            await query.edit_message_text(f"Granted {len(ids)} accounts to admin.")
         except Exception:
-            query.edit_message_text("Failed to grant selected accounts.")
+            logger.exception("grant_confirm_selected failed")
+            await query.edit_message_text("Failed to grant selected accounts.")
         context.user_data.pop("grant_selected_accounts", None)
         context.user_data.pop("grant_admin_selecting", None)
         return
 
     if data == "grant_cancel":
-        query.edit_message_text("Grant flow cancelled.")
+        await query.edit_message_text("Grant flow cancelled.")
         context.user_data.pop("grant_selected_accounts", None)
         context.user_data.pop("grant_admin_selecting", None)
         context.user_data.pop("grant_admin_step", None)
         return
 
     if data.startswith("revoke_confirm_admin:"):
-        admin_db_id = int(data.split(":",1)[1])
+        admin_db_id = int(data.split(":", 1)[1])
         try:
-            revoke_admin_all(conn, admin_db_id, actor_user_id=get_user_by_tg(conn, user.id)["id"])
+            revoke_admin_all(conn, admin_db_id, actor_user_id=actor_db_id)
             set_user_role(conn, admin_db_id, "user")
-            query.edit_message_text("Admin revoked successfully.")
+            await query.edit_message_text("Admin revoked successfully.")
         except Exception:
-            query.edit_message_text("Failed to revoke admin.")
+            logger.exception("revoke_confirm_admin failed")
+            await query.edit_message_text("Failed to revoke admin.")
         return
 
     if data == "owner_broadcast":
@@ -203,22 +218,22 @@ def callback_router(update: Update, context: CallbackContext):
             [InlineKeyboardButton("Specific IDs", callback_data="broadcast_scope:specific")],
             [InlineKeyboardButton("Cancel", callback_data="broadcast_cancel")]
         ]
-        query.edit_message_text("Choose broadcast scope:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("Choose broadcast scope:", reply_markup=InlineKeyboardMarkup(kb))
         return
 
     if data.startswith("broadcast_scope:"):
-        scope = data.split(":",1)[1]
+        scope = data.split(":", 1)[1]
         context.user_data["broadcast_scope"] = scope
         if scope == "specific":
-            query.edit_message_text("Reply in chat with comma-separated numeric TG IDs to broadcast to (e.g. 12345,67890).")
+            await query.edit_message_text("Reply in chat with comma-separated numeric TG IDs to broadcast to (e.g. 12345,67890).")
             context.user_data["broadcast_specific_step"] = True
             return
         context.user_data["broadcast_mode"] = True
-        query.edit_message_text("Send the broadcast message text now.")
+        await query.edit_message_text("Send the broadcast message text now.")
         return
 
     if data == "broadcast_cancel":
-        query.edit_message_text("Broadcast cancelled.")
+        await query.edit_message_text("Broadcast cancelled.")
         context.user_data.pop("broadcast_scope", None)
         context.user_data.pop("broadcast_mode", None)
         return
