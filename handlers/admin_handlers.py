@@ -71,7 +71,7 @@ async def callback_router(update: Update, context: CallbackContext):
     conn = get_conn()
     user = update.effective_user
 
-    # helper: safe actor db id
+    # safe actor DB id (may be None)
     actor_row = get_user_by_tg(conn, user.id)
     actor_db_id = actor_row["id"] if actor_row else None
 
@@ -101,7 +101,6 @@ async def callback_router(update: Update, context: CallbackContext):
         await query.edit_message_text("Users:\n\n" + "\n".join(lines))
         return
 
-    # Grant admin start
     if data == "owner_grant_admin":
         await query.edit_message_text("Reply in chat with the target admin's TELEGRAM NUMERIC ID to grant admin role.")
         context.user_data["grant_admin_step"] = "await_id"
@@ -112,7 +111,6 @@ async def callback_router(update: Update, context: CallbackContext):
         context.user_data["revoke_admin_step"] = "await_id"
         return
 
-    # Grant flow: scope selection and account selection
     if data.startswith("grant_scope_all:"):
         try:
             admin_db_id = int(data.split(":", 1)[1])
