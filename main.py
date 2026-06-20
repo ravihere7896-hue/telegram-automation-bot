@@ -3,13 +3,13 @@ import os
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from config import BOT_TOKEN, SCHEDULER_INTERVAL
 from handlers import start, help_command, echo, schedule_task, list_tasks
-from handlers import  # placeholder to keep import resolvable if needed
 from scheduler import start_scheduler
 from handlers.admin_handlers import callback_router
 from database.db_handler import get_conn
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 def ensure_migrations(conn):
     path = os.path.join(os.path.dirname(__file__), "database", "migrations", "001_roles_admin_access_and_logs.sql")
@@ -20,6 +20,7 @@ def ensure_migrations(conn):
             conn.executescript(sql)
         except Exception as e:
             logger.info("Migration may have already been applied or returned an error: %s", e)
+
 
 def main():
     token = BOT_TOKEN
@@ -47,6 +48,7 @@ def main():
     start_scheduler(application)
 
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
