@@ -5,11 +5,6 @@ from telegram import Update
 from telegram.ext import CallbackContext
 import os
 
-def _maybe_await(result):
-    if inspect.isawaitable(result):
-        return result
-    return result
-
 def require_registered(fn):
     @wraps(fn)
     async def wrapper(update: Update, context: CallbackContext, *args, **kwargs):
